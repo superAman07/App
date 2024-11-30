@@ -1,0 +1,57 @@
+// Prisma schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DIRECT_URL")
+}
+enum Role{
+  user
+  vendor
+}
+
+model User {
+  id        Int       @id @default(autoincrement())
+  name      String
+  email     String    @unique
+  password  String
+  role      Role    // "user" or "vendor"
+  medicines Medicine[] @relation("VendorMedicines")  // Reverse relation to Medicine
+  stores    Store[]    // Relation to stores
+  reviews   Review[]   // Relation to reviews
+}
+
+model Medicine {
+  id          Int       @id @default(autoincrement())
+  name        String
+  description String
+  price       Float
+  stock       Int
+  vendorId    Int
+  vendor      User      @relation("VendorMedicines", fields: [vendorId], references: [id]) // Relation to User (vendor)
+  storeId     Int?      // Foreign key to Store (if you want to associate Medicine with Store)
+  store       Store?    @relation(fields: [storeId], references: [id])  // Reverse relation to Store (optional)
+  reviews     Review[]  // A Medicine can have multiple reviews
+}
+
+model Store {
+  id       Int      @id @default(autoincrement())
+  name     String
+  location String
+  userId   Int
+  user     User     @relation(fields: [userId], references: [id])  // Relation to User
+  medicines Medicine[]  // A store can have many medicines
+}
+
+model Review {
+  id        Int      @id @default(autoincrement())
+  content   String
+  rating    Int
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])  // Relation to User
+  medicineId Int
+  medicine  Medicine @relation(fields: [medicineId], references: [id])  // Relation to Medicine
+}

@@ -2,38 +2,23 @@ import express, { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { validateUser, handleValidationErrors } from './validationMiddleware';  
+import { validateUser, handleValidationErrors } from './middlewares/validationMiddleware';  
+import {Authorize} from './middlewares/authosize'
 const app = express();
 const prisma = new PrismaClient();
 const port = process.env.PORT || 3000; 
 import dotenv from 'dotenv';
+import { sendOtp } from "./otpService";
 dotenv.config({ path: '../.env'});
 
-app.use(express.json()); 
-// Middleware to check if the user is authorized (optional for certain routes)
-// const authorize = (req: Request, res: Response, next: Function) => {
-//   const token = req.headers['authorization']?.split(' ')[1];
-//   console.log("Token: ", token); 
-//   if (!token) {
-//      res.status(401).json({ message: 'Unauthorized' });
-//      return;
-//   }
-//   jwt.verify(token, process.env.JWT_SECRET!, (err, decoded) => {
-//     if (err) {
-//       return res.status(401).json({ message: 'Unauthorized' });
-//     }
-//     console.log("Decoded Token:", decoded);
-//     req.user = decoded as any; // Store decoded user data (e.g., userId, email)
-//     next();
-//   });
-// };
+app.use(express.json());
 interface CustomRequest extends Request {
     user?: {
       userId: number;
       email: string;
       role: string
     };
-  }
+}
   
   
 const authorize = (req: CustomRequest, res: Response, next: Function) => {
@@ -49,61 +34,108 @@ const authorize = (req: CustomRequest, res: Response, next: Function) => {
             return res.status(401).json({ message: 'Unauthorized' });
         }
         console.log("Decoded Token:", decoded);   
-        req.user = decoded as { userId: number; email: string, role:string };
+        req.user = decoded as { userId: number; email: string, role:string,mobileNumber?: string; };
         console.log("User from decoded token:", req.user);  
         
         next();
     });
 };
-  
 
-// User Registration
 app.post('/signup', [...validateUser, handleValidationErrors], async (req: Request, res: Response): Promise<void> => {
-  const { name, email, password, role } = req.body;
+  const { name, mobileNumber, email, password, role } = req.body;
   try {
-    const existingUser = await prisma.user.findUnique({ where: { email } });
+    const existingUser = await prisma.user.findFirst({ 
+      where: {
+        OR: [
+          { mobileNumber },
+          { email }
+        ]
+      }
+    });
     if (existingUser) {
       res.status(400).json({ message: "User already exists. Please login." });
       return;
     }
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = await prisma.user.create({
+
+    const otp = Math.floor(100000 + Math.random() * 900000); 
+    const otpExpiry = new Date();
+    otpExpiry.setMinutes(otpExpiry.getMinutes() + 10);  
+    await sendOtp(mobileNumber, otp);
+ 
+    const user = await prisma.user.create({
       data: {
         name,
+        mobileNumber,
         email,
-        password: hashedPassword,
+        password: password ? await bcrypt.hash(password, 10) : null,
         role,
-      },
+        otp: otp.toString(),
+        otpExpiry,
+      }
     });
-    res.status(201).json(newUser);
+
+    res.status(201).json({ message: 'OTP sent to your mobile number.' });
   } catch (error: unknown) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
   }
 });
 
-// User Login
+app.post('/verify-otp',async (req:Request,res:Response):Promise<void>=>{
+  const {mobileNumber,otp}=req.body;
+  try{
+    const user = await prisma.user.findUnique({where:{mobileNumber}});
+    if(!user||user.otp != otp){
+      res.status(400).json({message:'Invalid OTP or Mobile Number.'});
+      return;
+    }
+    const otpExpiry = new Date(user.otpExpiry!);
+    if (otpExpiry < new Date()) {
+      res.status(400).json({ message: 'OTP has expired.' });
+      return;
+    }
+ 
+    const token = jwt.sign(
+      { userId: user.id, mobileNumber: user.mobileNumber, role: user.role },
+      process.env.JWT_SECRET!,
+      { expiresIn: '1h' }
+    );
+
+    res.status(200).json({ message: 'OTP verified successfully', token });
+  } catch (error: unknown) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
+  }
+});
+
 app.post('/login', async (req: Request, res: Response): Promise<void> => {
-  const { email, password } = req.body;
+  const { mobileNumber } = req.body;
   try {
-    const user = await prisma.user.findUnique({ where: { email } });
-    console.log(user)
+    const user = await prisma.user.findUnique({ where: { mobileNumber } });
     if (!user) {
-      res.status(400).json({ message: "Invalid credentials" });
+      res.status(400).json({ message: 'User not found. Please signup.' });
       return;
     }
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      res.status(400).json({ message: "Invalid credentials" });
-      return;
-    }
-    const token = jwt.sign({ userId: user.id, email: user.email , role: user.role }, process.env.JWT_SECRET!, { expiresIn: '1h' });
-    res.status(200).json({ message: "Login successful", token });
+
+    const otp = Math.floor(100000 + Math.random() * 900000); 
+    const otpExpiry = new Date();
+    otpExpiry.setMinutes(otpExpiry.getMinutes() + 10); 
+    await sendOtp(mobileNumber, otp); 
+    await prisma.user.update({
+      where: { mobileNumber },
+      data: { otp: otp.toString(), otpExpiry }
+    });
+
+    res.status(200).json({ message: 'OTP sent successfully to your mobile number' });
   } catch (error: unknown) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
   }
 });
 
-// Get all users
+// Middleware to authorize using JWT token
+app.get('/protected-resource', Authorize, (req: CustomRequest, res: Response) => {
+  res.json({ message: `Welcome ${req.user?.mobileNumber}, you have access to this resource!` });
+});
+
+ 
 app.get('/users', authorize, async (req: Request, res: Response): Promise<void> => {
   try {
     const users = await prisma.user.findMany();
@@ -112,8 +144,7 @@ app.get('/users', authorize, async (req: Request, res: Response): Promise<void> 
     res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
   }
 });
-
-// Get a specific user by ID
+ 
 app.get('/users/:id', authorize, async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
   try {
@@ -127,16 +158,91 @@ app.get('/users/:id', authorize, async (req: Request, res: Response): Promise<vo
     res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
   }
 });
-
-// Add a medicine (only for vendors)
+ 
 app.post('/medicines', authorize, async (req: Request, res: Response): Promise<void> => {
   const { name, description, price, stock, vendorId } = req.body;
-  try {
-    // Only allow vendors to add medicines
+  try { 
     const user = await prisma.user.findUnique({ where: { id: vendorId } });
     if (!user || user.role !== 'vendor') {
       res.status(403).json({ message: 'Only vendors can add medicines' });
       return;
+    }
+ 
+    const store = await prisma.store.findUnique({
+      where: { userId: vendorId },  
+    });
+
+    if (!store) {
+      res.status(404).json({ message: 'Store not found for the vendor' });
+      return;
+    }
+ 
+    const existingMedicine = await prisma.medicine.findFirst({
+      where: {
+        name: name,
+        vendorId: vendorId,
+      },
+    });
+
+    if (existingMedicine) { 
+      const updatedMedicine = await prisma.medicine.update({
+        where: {
+          id: existingMedicine.id,
+        },
+        data: {
+          stock: existingMedicine.stock + stock,
+          price: price,
+        },
+      });
+      res.status(200).json(updatedMedicine);
+      return;
+    }
+ 
+    const newMedicine = await prisma.medicine.create({
+      data: {
+        name,
+        description,
+        price,
+        stock, 
+        storeId: store.id,  
+        vendorId,            
+      },
+    });
+
+    res.status(201).json(newMedicine);
+  } catch (error: unknown) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
+  }
+});
+
+
+app.post('/medicines', authorize, async (req: Request, res: Response): Promise<void> => {
+  const { name, description, price, stock, vendorId } = req.body;
+  try {
+    const user = await prisma.user.findUnique({ where: { id: vendorId } });
+    if (!user || user.role !== 'vendor') {
+      res.status(403).json({ message: 'Only vendors can add medicines' });
+      return;
+    }
+    const existingMedicine = await prisma.medicine.findFirst({
+      where: {
+        name: name,
+        vendorId: vendorId,
+      },
+    });
+
+    if (existingMedicine) {
+      const updatedMedicine = await prisma.medicine.update({
+        where: {
+          id: existingMedicine.id
+        },
+        data: {
+          stock: existingMedicine.stock + stock,
+          price: price 
+        }
+      });
+       res.status(200).json(updatedMedicine);  
+       return;
     }
     const newMedicine = await prisma.medicine.create({
       data: {
@@ -147,13 +253,13 @@ app.post('/medicines', authorize, async (req: Request, res: Response): Promise<v
         vendorId,
       },
     });
+
     res.status(201).json(newMedicine);
   } catch (error: unknown) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
   }
 });
 
-// Get all medicines
 app.get('/medicines', async (req: Request, res: Response): Promise<void> => {
   try {
     const medicines = await prisma.medicine.findMany();
@@ -162,8 +268,6 @@ app.get('/medicines', async (req: Request, res: Response): Promise<void> => {
     res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
   }
 });
-
-// Get a specific medicine by ID
 app.get('/medicines/:id', async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
   try {
@@ -177,7 +281,6 @@ app.get('/medicines/:id', async (req: Request, res: Response): Promise<void> => 
     res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
   }
 });
-
 // Update a medicine (only for vendors)
 app.put('/medicines/:id', authorize, async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
@@ -205,11 +308,16 @@ app.put('/medicines/:id', authorize, async (req: Request, res: Response): Promis
 // Delete a medicine (only for vendors)
 app.delete('/medicines/:id', authorize, async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
+  const {vendorId} = req.body;
   try {
     const medicine = await prisma.medicine.findUnique({ where: { id: parseInt(id) } });
     if (!medicine) {
       res.status(404).json({ message: 'Medicine not found' });
       return;
+    }
+    if (medicine.vendorId !== vendorId) {
+        res.status(403).json({ message: 'You are not authorized to update this medicine' });
+        return;
     }
     const deletedMedicine = await prisma.medicine.delete({
       where: { id: parseInt(id) },
@@ -231,39 +339,49 @@ app.get('/vendors/:vendorId/medicines', async (req: Request, res: Response): Pro
   } catch (error: unknown) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
   }
-});
- 
+}); 
 
 app.post('/stores', authorize, async (req: CustomRequest, res: Response): Promise<void> => {
-    const { name, location } = req.body;
-    const { userId, role } = req.user || {};
-
-    console.log("User ID: ", userId);
-    console.log("User Role: ", role);
+  const { name, location } = req.body;
+  const { userId, role } = req.user || {};
  
-    if (!userId) {
-        res.status(400).json({ message: 'User is not authenticated' });
-        return;
-    }
+  if (!userId) {
+     res.status(400).json({ message: 'User is not authenticated' });
+     return;
+  }
  
-    if (role !== 'vendor') {
-        res.status(403).json({ message: 'Only vendors are allowed to create stores' });
-        return;
-    }
+  if (role !== 'vendor') {
+     res.status(403).json({ message: 'Only vendors are allowed to create stores' });
+     return;
+  }
+ 
+  if (!name || !location) {
+     res.status(400).json({ message: 'Store name and location are required' });
+     return;
+  }
 
-    try {
-        const newStore = await prisma.store.create({
-            data: {
-                name,
-                location,
-                userId,
-            },
-        });
+  try { 
+    const existingStore = await prisma.store.findFirst({
+      where: { name, userId },
+    });
 
-        res.status(201).json(newStore);
-    } catch (error: unknown) {
-        res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
-    }
+    if (existingStore) {
+       res.status(400).json({ message: 'Store with the same name already exists' });
+       return;  
+   }
+ 
+    const newStore = await prisma.store.create({
+      data: { 
+        name,
+        location,
+        userId,
+      },
+    });
+
+    res.status(201).json(newStore);
+  } catch (error: unknown) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
+  }
 });
 
 
@@ -435,7 +553,7 @@ app.delete('/reviews/:id', authorize, async (req: Request, res: Response): Promi
     } catch (error: unknown) {
       res.status(500).json({ error: error instanceof Error ? error.message : 'An unknown error occurred' });
     }
-  });
+});
   
   
   
@@ -450,3 +568,4 @@ app.delete('/reviews/:id', authorize, async (req: Request, res: Response): Promi
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
 });
+

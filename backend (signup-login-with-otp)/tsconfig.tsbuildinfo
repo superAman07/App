@@ -1,0 +1,1 @@
+{"root":["./src/app.ts","./src/middlewares/errorhandler.ts","./src/prisma/prismaclient.ts","./src/routes/authroutes.ts","./src/services/otpservice.ts","./src/test/twilio.ts","./src/utils/jwthelper.ts","./src/utils/otphelper.ts"],"version":"5.7.2"}

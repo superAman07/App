@@ -1,0 +1,65 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DIRECT_URL")
+}
+
+enum Role {
+  user
+  vendor
+}
+
+model User {
+  id          Int       @id @default(autoincrement())
+  name        String
+  mobileNumber String   @unique 
+  role        Role
+  // otp         String?    
+  otpExpiry   DateTime? 
+  medicines   Medicine[] @relation("VendorMedicines") 
+  store       Store?    
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  otp         Otp[]
+}
+
+model Medicine {
+  id          Int       @id @default(autoincrement())
+  name        String
+  description String
+  price       Float
+  stock       Int
+  vendorId    Int
+  vendor      User      @relation("VendorMedicines", fields: [vendorId], references: [id])
+  storeId     Int?
+  store       Store?    @relation(fields: [storeId], references: [id])
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+model Store {
+  id          Int       @id @default(autoincrement())
+  name        String
+  location    String    // Address or coordinates
+  userId      Int       @unique // Each store is managed by one vendor
+  user        User      @relation(fields: [userId], references: [id])
+  medicines   Medicine[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+model Otp {
+  id           Int      @id @default(autoincrement())
+  mobileNumber String      
+  otp          Int
+  userId       Int?      
+  expiresAt    DateTime
+  user         User?    @relation(fields: [userId], references: [id])
+  createdAt    DateTime @default(now())
+
+  @@index([mobileNumber])  
+}
+
+
